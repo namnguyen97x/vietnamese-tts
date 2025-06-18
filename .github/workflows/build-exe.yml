@@ -50,19 +50,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vietnamese-tts-exe
-          path: |
-            dist/main.exe
-            dist/bin/**
-            vietnamese-tts-portable.zip
+          path: vietnamese-tts-portable.zip
 
       - name: Upload to GitHub Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/main.exe
-            dist/bin/**
-            vietnamese-tts-portable.zip
+          files: vietnamese-tts-portable.zip
           body: |
             # Vietnamese TTS Portable
             - Giải nén file zip, chạy main.exe
