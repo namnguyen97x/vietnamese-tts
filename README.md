@@ -1,6 +1,6 @@
 # Vietnamese Text-to-Speech (TTS)
 
-Ứng dụng chuyển văn bản thành giọng nói tiếng Việt sử dụng Edge TTS và Google TTS.
+Ứng dụng chuyển văn bản thành giọng nói tiếng Việt sử dụng Edge TTS, Google TTS và nhận diện giọng nói (Speech to Text).
 
 ## Tính năng (Features)
 
@@ -8,6 +8,9 @@
 - Hỗ trợ hai công nghệ TTS:
   - Microsoft Edge TTS (chất lượng cao, nhiều giọng đọc, đa ngôn ngữ)
   - Google TTS (gTTS)
+- Nhận diện giọng nói (Speech to Text):
+  - Nhận diện từ file âm thanh (mp3, wav, flac, ...)
+  - Nhận diện trực tiếp từ micro
 - Giao diện đồ họa dễ sử dụng
 - Hỗ trợ nhập văn bản từ file .txt và .docx
 - Phát thử và lưu file âm thanh
@@ -18,6 +21,7 @@
 
 - Python 3.7 trở lên
 - Các thư viện Python (xem requirements.txt)
+- Nếu dùng tính năng thu âm micro: cần cài driver micro và có micro trên máy tính
 
 ## Cài đặt (Installation)
 
@@ -52,6 +56,11 @@ python main.py
    - Chọn ngôn ngữ (vi/en)
    - Nhấn "Đọc thử" để nghe thử
    - Lưu file âm thanh nếu muốn
+
+4. Sử dụng Speech to Text (STT):
+   - Chọn tab "Speech to Text (STT)"
+   - Nhấn "Nhận diện từ file âm thanh" để chọn file mp3, wav, flac, ... và chuyển thành văn bản
+   - Hoặc nhấn "Nhận diện từ micro" để nói trực tiếp, kết quả sẽ hiển thị trong ô bên dưới
 
 ## Quản lý file âm thanh (Audio File Management)
 
