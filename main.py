@@ -21,7 +21,11 @@ import numpy
 import wave
 
 # Thêm ./bin vào PATH để pydub và subprocess luôn tìm thấy ffmpeg/ffprobe
-bin_dir = os.path.join(os.path.dirname(__file__), 'bin')
+if hasattr(sys, '_MEIPASS'):
+    base_dir = sys._MEIPASS
+else:
+    base_dir = os.path.dirname(os.path.abspath(sys.executable))
+bin_dir = os.path.join(base_dir, 'bin')
 os.environ["PATH"] += os.pathsep + bin_dir
 ffmpeg_path = os.path.join(bin_dir, 'ffmpeg.exe')
 ffprobe_path = os.path.join(bin_dir, 'ffprobe.exe')
