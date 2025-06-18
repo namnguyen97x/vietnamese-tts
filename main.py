@@ -22,7 +22,16 @@ import wave
 def get_bin_dir():
     # Khi chạy bằng PyInstaller (onefile)
     if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, 'bin')
+        # Ưu tiên bin trong thư mục giải nén tạm
+        bin_path = os.path.join(sys._MEIPASS, 'bin')
+        if os.path.exists(bin_path):
+            return bin_path
+        # Nếu không có, thử bin cạnh file exe
+        exe_dir = os.path.dirname(sys.executable)
+        bin_path2 = os.path.join(exe_dir, 'bin')
+        if os.path.exists(bin_path2):
+            return bin_path2
+        return bin_path  # fallback
     # Khi chạy file .py trực tiếp
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bin')
 
