@@ -1,0 +1,62 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --windowed main.py
+
+      - name: Copy bin folder to dist
+        run: |
+          if exist bin xcopy /E /I /Y bin dist\bin
+
+      - name: Zip portable app
+        run: |
+          powershell Compress-Archive -Path dist\* -DestinationPath vietnamese-tts-portable.zip
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: vietnamese-tts-exe
+          path: |
+            dist/main.exe
+            dist/bin/**
+            vietnamese-tts-portable.zip
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/main.exe
+            dist/bin/**
+            vietnamese-tts-portable.zip
+          body: |
+            # Vietnamese TTS Portable
+            - Giải nén file zip, chạy main.exe
+            - Đảm bảo giữ nguyên thư mục bin/ bên cạnh main.exe
+            - Không cần cài đặt Python, ffmpeg, ...
+            - Hỗ trợ nhận diện và tổng hợp giọng nói tiếng Việt, lưu file âm thanh, văn bản, ... 
