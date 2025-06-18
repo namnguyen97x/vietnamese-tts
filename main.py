@@ -354,6 +354,9 @@ class TTSApp(QMainWindow):
     def on_gtts_finished(self, file_path):
         self.current_audio_file = file_path
         self.show_loading(False)
+        # Thêm file tạm vào danh sách
+        name = f"TTS_{os.path.basename(file_path)}"
+        self.add_audio_file(name, file_path)
         self.play_audio()
 
     def play_audio(self):
