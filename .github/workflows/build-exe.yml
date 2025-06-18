@@ -29,9 +29,18 @@ jobs:
         run: |
           pyinstaller --noconfirm --onefile --windowed main.py
 
-      - name: Copy bin folder to dist
+      - name: Download ffmpeg static build
         run: |
-          if exist bin xcopy /E /I /Y bin dist\bin
+          curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          powershell Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extract
+
+      - name: Copy ffmpeg bin to dist/bin
+        run: |
+          $ffdir = Get-ChildItem -Directory ffmpeg_extract | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path dist/bin | Out-Null
+          Copy-Item -Path "$ffdir\bin\ffmpeg.exe" -Destination dist/bin/
+          Copy-Item -Path "$ffdir\bin\ffprobe.exe" -Destination dist/bin/
+          Copy-Item -Path "$ffdir\bin\ffplay.exe" -Destination dist/bin/ -ErrorAction SilentlyContinue
 
       - name: Zip portable app
         run: |
@@ -57,6 +66,6 @@ jobs:
           body: |
             # Vietnamese TTS Portable
             - Giải nén file zip, chạy main.exe
-            - Đảm bảo giữ nguyên thư mục bin/ bên cạnh main.exe
+            - Đảm bảo giữ nguyên thư mục bin/ bên cạnh main.exe (ffmpeg, ffprobe đã được tích hợp tự động)
             - Không cần cài đặt Python, ffmpeg, ...
             - Hỗ trợ nhận diện và tổng hợp giọng nói tiếng Việt, lưu file âm thanh, văn bản, ... 
