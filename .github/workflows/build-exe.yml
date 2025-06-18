@@ -27,7 +27,7 @@ jobs:
 
       - name: Build EXE with PyInstaller
         run: |
-          pyinstaller --noconfirm --onefile --windowed main.py
+          pyinstaller --noconfirm --onefile --windowed main.py --hidden-import=numpy
 
       - name: Download ffmpeg static build
         run: |

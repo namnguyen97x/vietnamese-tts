@@ -17,7 +17,7 @@ from pydub import AudioSegment
 from pydub.utils import which
 import subprocess
 import sounddevice as sd
-import numpy as np
+import numpy
 import wave
 
 # Thêm ./bin vào PATH để pydub và subprocess luôn tìm thấy ffmpeg/ffprobe
