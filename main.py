@@ -543,9 +543,14 @@ class TTSApp(QMainWindow):
                 print(f"[WARNING] Pydub lỗi: {e}, thử chuyển bằng ffmpeg trực tiếp...")
                 tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                 tmp_wav.close()
+                # Đảm bảo không mở console khi gọi ffmpeg trên Windows
+                startupinfo = None
+                if sys.platform == "win32":
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 cmd = [ffmpeg_path, '-y', '-i', file_path, '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000', tmp_wav.name]
                 print("[DEBUG] CMD:", cmd)
-                subprocess.run(cmd, check=True)
+                subprocess.run(cmd, check=True, startupinfo=startupinfo)
                 temp_wav = tmp_wav.name
                 file_path = temp_wav
                 print(f"[DEBUG] File wav tạm (ffmpeg): {file_path}")
