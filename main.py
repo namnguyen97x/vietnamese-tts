@@ -201,31 +201,20 @@ class STTFileWorker(QThread):
         self.ffmpeg_path = ffmpeg_path
     def run(self):
         import speech_recognition as sr
-        import tempfile, os, sys
-        from pydub import AudioSegment
+        import tempfile, os, sys, subprocess
         temp_wav = None
         try:
             ext = os.path.splitext(self.file_path)[1].lower()
             creationflags = 0
             if sys.platform == "win32":
                 creationflags = subprocess.CREATE_NO_WINDOW
-            if ext not in ['.wav', '.flac', '.aiff', '.aif']:
-                try:
-                    audio = AudioSegment.from_file(self.file_path)
-                    tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-                    audio.export(tmp_wav.name, format='wav', parameters=['-acodec', 'pcm_s16le', '-ac', '1'])
-                    tmp_wav.close()
-                    temp_wav = tmp_wav.name
-                    self.file_path = temp_wav
-                except Exception as e:
-                    # Nếu pydub lỗi, thử dùng ffmpeg trực tiếp
-                    tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                    tmp_wav.close()
-                    cmd = [self.ffmpeg_path, '-y', '-i', self.file_path, '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000', tmp_wav.name]
-                    subprocess.run(cmd, check=True, creationflags=creationflags)
-                    temp_wav = tmp_wav.name
-                    self.file_path = temp_wav
+            # Luôn chuyển đổi sang wav chuẩn PCM 16-bit mono bằng ffmpeg
+            tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            tmp_wav.close()
+            cmd = [self.ffmpeg_path, '-y', '-i', self.file_path, '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000', tmp_wav.name]
+            subprocess.run(cmd, check=True, creationflags=creationflags)
+            temp_wav = tmp_wav.name
+            self.file_path = temp_wav
             recognizer = sr.Recognizer()
             with sr.AudioFile(self.file_path) as source:
                 audio = recognizer.record(source)
