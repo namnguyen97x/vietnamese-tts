@@ -3,6 +3,7 @@ import os
 import asyncio
 import tempfile
 import uuid
+import requests
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QTextEdit, QPushButton, QTabWidget,
                            QLabel, QComboBox, QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QListWidget, QListWidgetItem)
@@ -11,6 +12,49 @@ from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 import edge_tts
 from gtts import gTTS
 from docx import Document
+
+# --- LẤY DANH SÁCH GIỌNG ĐỌC KHẢ DỤNG ---
+def get_available_voices():
+    """
+    Lấy danh sách voice khả dụng từ edge-tts, chỉ giữ lại tiếng Việt và Multilingual.
+    """
+    url = "https://eastus.tts.speech.microsoft.com/cognitiveservices/voices/list"
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+    resp = requests.get(url, headers=headers, timeout=10)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Lỗi lấy danh sách voice: {resp.status_code} - {resp.text}")
+    voices = resp.json()
+    filtered = {}
+    for v in voices:
+        # Tiếng Việt
+        if v["Locale"] == "vi-VN":
+            filtered[v["ShortName"]] = f"{v['LocalName']} ({'Nữ' if v['Gender']=='Female' else 'Nam'} - Tiếng Việt)"
+        # Multilingual
+        elif "MultilingualNeural" in v["ShortName"]:
+            lang = v["Locale"]
+            name = v["LocalName"]
+            gender = "Nữ" if v["Gender"] == "Female" else "Nam"
+            filtered[v["ShortName"]] = f"{name} ({gender} - {lang}, Đa ngôn ngữ)"
+    return filtered
+
+# Danh sách giọng đọc mặc định nếu không lấy được từ API
+VOICE_LIST = {
+    "vi-VN-HoaiMyNeural": "Hoài My (Nữ - Tiếng Việt)",
+    "vi-VN-NamMinhNeural": "Nam Minh (Nam - Tiếng Việt)",
+    "de-DE-FlorianMultilingualNeural": "Florian (Nam - Đa ngôn ngữ)",
+    "de-DE-SeraphinaMultilingualNeural": "Seraphina (Nữ - Đa ngôn ngữ)",
+    "en-US-AndrewMultilingualNeural": "Andrew (Nam - Đa ngôn ngữ)",
+    "en-US-AvaMultilingualNeural": "Ava (Nữ - Đa ngôn ngữ)",
+    "en-US-BrianMultilingualNeural": "Brian (Nam - Đa ngôn ngữ)",
+    "en-US-EmmaMultilingualNeural": "Emma (Nữ - Đa ngôn ngữ)",
+    "fr-FR-RemyMultilingualNeural": "Remy (Nam - Đa ngôn ngữ)",
+    "fr-FR-VivienneMultilingualNeural": "Vivienne (Nữ - Đa ngôn ngữ)",
+    "it-IT-GiuseppeMultilingualNeural": "Giuseppe (Nam - Đa ngôn ngữ)",
+    "ko-KR-HyunsuMultilingualNeural": "Hyunsu (Nam - Đa ngôn ngữ)",
+    "pt-BR-ThalitaMultilingualNeural": "Thalita (Nữ - Đa ngôn ngữ)",
+}
 
 class EdgeTTSWorker(QThread):
     finished = pyqtSignal(str)
@@ -96,10 +140,13 @@ class TTSApp(QMainWindow):
         voice_layout = QHBoxLayout()
         voice_layout.addWidget(QLabel("Chọn giọng đọc:"))
         self.voice_combo = QComboBox()
-        self.voice_combo.addItems([
-            "vi-VN-HoaiMyNeural - Nữ (Nam)",
-            "vi-VN-NamMinhNeural - Nam (Nam)"
-        ])
+        try:
+            # Thử lấy danh sách giọng đọc từ API
+            voices = get_available_voices()
+            self.voice_combo.addItems([f"{code} - {name}" for code, name in voices.items()])
+        except Exception:
+            # Nếu không lấy được thì dùng danh sách mặc định
+            self.voice_combo.addItems([f"{code} - {name}" for code, name in VOICE_LIST.items()])
         voice_layout.addWidget(self.voice_combo)
         edge_layout.addLayout(voice_layout)
         edge_file_layout = QHBoxLayout()
@@ -244,7 +291,7 @@ class TTSApp(QMainWindow):
             return '\n'.join([p.text for p in doc.paragraphs])
         return ""
     def process_edge_file(self, file, text):
-        voice_code = self.voice_combo.currentText().split(' ')[0]
+        voice_code = self.voice_combo.currentText().split(' - ')[0]  # Lấy mã giọng đọc từ combobox
         self.show_loading(True)
         self.edge_worker = EdgeTTSWorker(text, voice_code)
         self.edge_worker.finished.connect(lambda temp_path: self.on_edge_file_ready(temp_path, file))
@@ -276,10 +323,11 @@ class TTSApp(QMainWindow):
             self.loading_label.setText("")
 
     def speak_edge(self):
-        text = self.text_input.toPlainText()
+        text = self.text_input.toPlainText().strip()
         if not text:
+            QMessageBox.warning(self, "Cảnh báo", "Vui lòng nhập văn bản cần đọc.")
             return
-        voice_code = self.voice_combo.currentText().split(' ')[0]
+        voice_code = self.voice_combo.currentText().split(' - ')[0]  # Lấy mã giọng đọc từ combobox
         self.show_loading(True)
         self.edge_worker = EdgeTTSWorker(text, voice_code)
         self.edge_worker.finished.connect(self.on_edge_tts_finished)
@@ -288,6 +336,9 @@ class TTSApp(QMainWindow):
     def on_edge_tts_finished(self, file_path):
         self.current_audio_file = file_path
         self.show_loading(False)
+        # Thêm file tạm vào danh sách
+        name = f"TTS_{os.path.basename(file_path)}"
+        self.add_audio_file(name, file_path)
         self.play_audio()
 
     def speak_gtts(self):
