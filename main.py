@@ -544,13 +544,12 @@ class TTSApp(QMainWindow):
                 tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
                 tmp_wav.close()
                 # Đảm bảo không mở console khi gọi ffmpeg trên Windows
-                startupinfo = None
+                creationflags = 0
                 if sys.platform == "win32":
-                    startupinfo = subprocess.STARTUPINFO()
-                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    creationflags = subprocess.CREATE_NO_WINDOW
                 cmd = [ffmpeg_path, '-y', '-i', file_path, '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000', tmp_wav.name]
                 print("[DEBUG] CMD:", cmd)
-                subprocess.run(cmd, check=True, startupinfo=startupinfo)
+                subprocess.run(cmd, check=True, creationflags=creationflags)
                 temp_wav = tmp_wav.name
                 file_path = temp_wav
                 print(f"[DEBUG] File wav tạm (ffmpeg): {file_path}")
