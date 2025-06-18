@@ -192,6 +192,51 @@ class MicrophoneWorker(QThread):
         self._running = False
         # Không cần terminate, callback sẽ tự dừng
 
+class STTFileWorker(QThread):
+    result = pyqtSignal(str)
+    error = pyqtSignal(str)
+    def __init__(self, file_path, ffmpeg_path):
+        super().__init__()
+        self.file_path = file_path
+        self.ffmpeg_path = ffmpeg_path
+    def run(self):
+        import speech_recognition as sr
+        import tempfile, os, sys
+        from pydub import AudioSegment
+        temp_wav = None
+        try:
+            ext = os.path.splitext(self.file_path)[1].lower()
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = subprocess.CREATE_NO_WINDOW
+            if ext not in ['.wav', '.flac', '.aiff', '.aif']:
+                try:
+                    audio = AudioSegment.from_file(self.file_path)
+                    tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+                    audio.export(tmp_wav.name, format='wav', parameters=['-acodec', 'pcm_s16le', '-ac', '1'])
+                    tmp_wav.close()
+                    temp_wav = tmp_wav.name
+                    self.file_path = temp_wav
+                except Exception as e:
+                    # Nếu pydub lỗi, thử dùng ffmpeg trực tiếp
+                    tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+                    tmp_wav.close()
+                    cmd = [self.ffmpeg_path, '-y', '-i', self.file_path, '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000', tmp_wav.name]
+                    subprocess.run(cmd, check=True, creationflags=creationflags)
+                    temp_wav = tmp_wav.name
+                    self.file_path = temp_wav
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(self.file_path) as source:
+                audio = recognizer.record(source)
+            text = recognizer.recognize_google(audio, language='vi-VN')
+            self.result.emit(text)
+        except Exception as e:
+            self.error.emit(f"Lỗi nhận diện: {e}")
+        finally:
+            if temp_wav and os.path.exists(temp_wav):
+                os.remove(temp_wav)
+
 class TTSApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -525,47 +570,26 @@ class TTSApp(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Chọn file âm thanh", "", "Audio Files (*.wav *.mp3 *.flac *.aiff *.ogg)")
         if not file_path:
             return
-        recognizer = sr.Recognizer()
-        temp_wav = None
-        try:
-            print(f"[DEBUG] Đang chuyển đổi file: {file_path}")
-            # Luôn chuyển sang wav tạm PCM 16-bit mono 16kHz
-            try:
-                audio = AudioSegment.from_file(file_path)
-                tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-                audio.export(tmp_wav.name, format='wav', parameters=['-acodec', 'pcm_s16le', '-ac', '1'])
-                tmp_wav.close()
-                temp_wav = tmp_wav.name
-                file_path = temp_wav
-                print(f"[DEBUG] File wav tạm (pydub): {file_path}")
-            except Exception as e:
-                print(f"[WARNING] Pydub lỗi: {e}, thử chuyển bằng ffmpeg trực tiếp...")
-                tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-                tmp_wav.close()
-                # Đảm bảo không mở console khi gọi ffmpeg trên Windows
-                creationflags = 0
-                if sys.platform == "win32":
-                    creationflags = subprocess.CREATE_NO_WINDOW
-                cmd = [ffmpeg_path, '-y', '-i', file_path, '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000', tmp_wav.name]
-                print("[DEBUG] CMD:", cmd)
-                subprocess.run(cmd, check=True, creationflags=creationflags)
-                temp_wav = tmp_wav.name
-                file_path = temp_wav
-                print(f"[DEBUG] File wav tạm (ffmpeg): {file_path}")
-        except Exception as e:
-            self.stt_result.setPlainText(f"Lỗi chuyển đổi file: {e}")
-            return
-        try:
-            with sr.AudioFile(file_path) as source:
-                audio = recognizer.record(source)
-            text = recognizer.recognize_google(audio, language='vi-VN')
-            self.stt_result.setPlainText(text)
-        except Exception as e:
-            self.stt_result.setPlainText(f"Lỗi nhận diện: {e}")
-        finally:
-            if temp_wav and os.path.exists(temp_wav):
-                os.remove(temp_wav)
+        self.stt_result.setPlainText("Đang xử lý file âm thanh...")
+        self.stt_file_btn.setEnabled(False)
+        self.stt_mic_start_btn.setEnabled(False)
+        self.stt_mic_stop_btn.setEnabled(False)
+        self.stt_worker = STTFileWorker(file_path, ffmpeg_path)
+        self.stt_worker.result.connect(self.on_stt_file_result)
+        self.stt_worker.error.connect(self.on_stt_file_error)
+        self.stt_worker.finished.connect(self.on_stt_file_finished)
+        self.stt_worker.start()
+
+    def on_stt_file_result(self, text):
+        self.stt_result.setPlainText(text)
+
+    def on_stt_file_error(self, msg):
+        self.stt_result.setPlainText(msg)
+
+    def on_stt_file_finished(self):
+        self.stt_file_btn.setEnabled(True)
+        self.stt_mic_start_btn.setEnabled(True)
+        self.stt_mic_stop_btn.setEnabled(False)
 
     def start_mic_recording(self):
         self.stt_result.setPlainText("")
