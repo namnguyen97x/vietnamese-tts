@@ -1,5 +1,4 @@
-import sys
-import os
+import sys, os
 import asyncio
 import tempfile
 import uuid
@@ -17,15 +16,17 @@ from pydub import AudioSegment
 from pydub.utils import which
 import subprocess
 import sounddevice as sd
-import numpy
+import numpy as np
 import wave
 
-# Thêm ./bin vào PATH để pydub và subprocess luôn tìm thấy ffmpeg/ffprobe
-if hasattr(sys, '_MEIPASS'):
-    base_dir = sys._MEIPASS
-else:
-    base_dir = os.path.dirname(os.path.abspath(sys.executable))
-bin_dir = os.path.join(base_dir, 'bin')
+def get_bin_dir():
+    # Khi chạy bằng PyInstaller (onefile)
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, 'bin')
+    # Khi chạy file .py trực tiếp
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bin')
+
+bin_dir = get_bin_dir()
 os.environ["PATH"] += os.pathsep + bin_dir
 ffmpeg_path = os.path.join(bin_dir, 'ffmpeg.exe')
 ffprobe_path = os.path.join(bin_dir, 'ffprobe.exe')
