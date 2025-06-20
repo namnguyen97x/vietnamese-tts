@@ -3,11 +3,17 @@ import asyncio
 import tempfile
 import uuid
 import requests
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+import webbrowser
+import browser_cookie3
+import json
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QTextEdit, QPushButton, QTabWidget,
-                           QLabel, QComboBox, QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QListWidget, QListWidgetItem)
-from PyQt5.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
+                           QLabel, QComboBox, QFileDialog, QMessageBox, QDialog, QDialogButtonBox, QListWidget, QListWidgetItem, QStatusBar)
+from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal, QTimer, QByteArray, QDateTime
+from PyQt6.QtNetwork import QNetworkCookie
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
 import edge_tts
 from gtts import gTTS
 from docx import Document
@@ -18,9 +24,10 @@ import subprocess
 import sounddevice as sd
 import numpy as np
 import wave
+import docx
+import fitz
 
 def get_bin_dir():
-    # Luôn lấy bin cạnh file thực thi (dù là .py hay .exe)
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
         return os.path.join(exe_dir, 'bin')
@@ -45,152 +52,62 @@ if os.path.exists(ffprobe_path):
 else:
     print(f"[WARNING] Không tìm thấy ffprobe tại: {ffprobe_path}. Hãy kiểm tra lại tên file và vị trí!")
 
-# --- LẤY DANH SÁCH GIỌNG ĐỌC KHẢ DỤNG ---
-def get_available_voices():
-    """
-    Lấy danh sách voice khả dụng từ edge-tts, chỉ giữ lại tiếng Việt và Multilingual.
-    """
-    url = "https://eastus.tts.speech.microsoft.com/cognitiveservices/voices/list"
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-    resp = requests.get(url, headers=headers, timeout=10)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Lỗi lấy danh sách voice: {resp.status_code} - {resp.text}")
-    voices = resp.json()
-    filtered = {}
-    for v in voices:
-        # Tiếng Việt
-        if v["Locale"] == "vi-VN":
-            filtered[v["ShortName"]] = f"{v['LocalName']} ({'Nữ' if v['Gender']=='Female' else 'Nam'} - Tiếng Việt)"
-        # Multilingual
-        elif "MultilingualNeural" in v["ShortName"]:
-            lang = v["Locale"]
-            name = v["LocalName"]
-            gender = "Nữ" if v["Gender"] == "Female" else "Nam"
-            filtered[v["ShortName"]] = f"{name} ({gender} - {lang}, Đa ngôn ngữ)"
-    return filtered
+class GeminiWebPage(QWebEnginePage):
+    popup_url_found = pyqtSignal(QUrl)
 
-# Danh sách giọng đọc mặc định nếu không lấy được từ API
-VOICE_LIST = {
-    "vi-VN-HoaiMyNeural": "Hoài My (Nữ - Tiếng Việt)",
-    "vi-VN-NamMinhNeural": "Nam Minh (Nam - Tiếng Việt)",
-    "de-DE-FlorianMultilingualNeural": "Florian (Nam - Đa ngôn ngữ)",
-    "de-DE-SeraphinaMultilingualNeural": "Seraphina (Nữ - Đa ngôn ngữ)",
-    "en-US-AndrewMultilingualNeural": "Andrew (Nam - Đa ngôn ngữ)",
-    "en-US-AvaMultilingualNeural": "Ava (Nữ - Đa ngôn ngữ)",
-    "en-US-BrianMultilingualNeural": "Brian (Nam - Đa ngôn ngữ)",
-    "en-US-EmmaMultilingualNeural": "Emma (Nữ - Đa ngôn ngữ)",
-    "fr-FR-RemyMultilingualNeural": "Remy (Nam - Đa ngôn ngữ)",
-    "fr-FR-VivienneMultilingualNeural": "Vivienne (Nữ - Đa ngôn ngữ)",
-    "it-IT-GiuseppeMultilingualNeural": "Giuseppe (Nam - Đa ngôn ngữ)",
-    "ko-KR-HyunsuMultilingualNeural": "Hyunsu (Nam - Đa ngôn ngữ)",
-    "pt-BR-ThalitaMultilingualNeural": "Thalita (Nữ - Đa ngôn ngữ)",
-}
+    def createWindow(self, _type):
+        popup_page = GeminiWebPage(self.profile(), self)
+        popup_page.urlChanged.connect(self.popup_url_found)
+        return popup_page
 
 class EdgeTTSWorker(QThread):
-    finished = pyqtSignal(str)
-    def __init__(self, text, voice_code, output_file=None):
+    voices_loaded = pyqtSignal(list)
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, text=None, voice=None, output_file=None, load_voices_only=False):
         super().__init__()
         self.text = text
-        self.voice_code = voice_code
+        self.voice = voice
         self.output_file = output_file
+        self.load_voices_only = load_voices_only
+
     def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._speak())
-    async def _speak(self):
-        communicate = edge_tts.Communicate(self.text, self.voice_code)
-        if self.output_file:
-            await communicate.save(self.output_file)
-            self.finished.emit(self.output_file)
-        else:
-            temp_file = os.path.join(tempfile.gettempdir(), f"tts_{uuid.uuid4().hex}.wav")
-            await communicate.save(temp_file)
-            self.finished.emit(temp_file)
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            if self.load_voices_only:
+                voices = loop.run_until_complete(edge_tts.list_voices())
+                self.voices_loaded.emit(voices)
+            else:
+                if not self.text or not self.voice:
+                    raise ValueError("Text và Voice không được để trống khi tạo âm thanh.")
+                communicate = edge_tts.Communicate(self.text, self.voice)
+                loop.run_until_complete(communicate.save(self.output_file))
+                self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
 
 class GttsWorker(QThread):
     finished = pyqtSignal(str)
-    def __init__(self, text, lang, output_file=None):
+    error = pyqtSignal(str)
+
+    def __init__(self, text, lang):
         super().__init__()
         self.text = text
         self.lang = lang
-        self.output_file = output_file
-    def run(self):
-        tts = gTTS(text=self.text, lang=self.lang)
-        if self.output_file:
-            tts.save(self.output_file)
-            self.finished.emit(self.output_file)
-        else:
-            temp_file = os.path.join(tempfile.gettempdir(), f"gtts_{uuid.uuid4().hex}.mp3")
-            tts.save(temp_file)
-            self.finished.emit(temp_file)
 
-class EditTextDialog(QDialog):
-    def __init__(self, filename, text, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"Chỉnh sửa: {os.path.basename(filename)}")
-        self.resize(600, 400)
-        layout = QVBoxLayout(self)
-        self.text_edit = QTextEdit(self)
-        self.text_edit.setPlainText(text)
-        layout.addWidget(self.text_edit)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-    def get_text(self):
-        return self.text_edit.toPlainText()
-
-class MicrophoneWorker(QThread):
-    result = pyqtSignal(str)
-    error = pyqtSignal(str)
-    listening = pyqtSignal(bool)
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._running = False
-        self._audio_file = None
-        self._stream = None
-        self._frames = []
-        self._samplerate = 16000
-        self._channels = 1
-        self._dtype = 'int16'
     def run(self):
-        self._running = True
-        self.listening.emit(True)
-        self._frames = []
         try:
-            def callback(indata, frames, time, status):
-                if not self._running:
-                    raise sd.CallbackStop()
-                self._frames.append(indata.copy())
-            with sd.InputStream(samplerate=self._samplerate, channels=self._channels, dtype=self._dtype, callback=callback):
-                while self._running:
-                    sd.sleep(100)
-            # Lưu file wav tạm
-            self._audio_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            wf = wave.open(self._audio_file.name, 'wb')
-            wf.setnchannels(self._channels)
-            wf.setsampwidth(np.dtype(self._dtype).itemsize)
-            wf.setframerate(self._samplerate)
-            wf.writeframes(b''.join([f.tobytes() for f in self._frames]))
-            wf.close()
-            self.listening.emit(False)
-            # Nhận diện bằng speech_recognition
-            recognizer = sr.Recognizer()
-            with sr.AudioFile(self._audio_file.name) as source:
-                audio = recognizer.record(source)
-            try:
-                text = recognizer.recognize_google(audio, language='vi-VN')
-                self.result.emit(text)
-            except Exception as e:
-                self.error.emit(f"Lỗi nhận diện: {e}")
+            tts = gTTS(self.text, lang=self.lang)
+            temp_dir = tempfile.gettempdir()
+            timestamp = QDateTime.currentDateTime().toString("yyyyMMdd_hhmmss")
+            output_path = os.path.join(temp_dir, f"gtts_{timestamp}_{uuid.uuid4().hex[:6]}.mp3")
+            tts.save(output_path)
+            self.finished.emit(output_path)
         except Exception as e:
-            self.listening.emit(False)
-            self.error.emit(f"Lỗi ghi âm: {e}")
-    def stop(self):
-        self._running = False
-        # Không cần terminate, callback sẽ tự dừng
+            self.error.emit(str(e))
 
 class STTFileWorker(QThread):
     result = pyqtSignal(str)
@@ -204,19 +121,14 @@ class STTFileWorker(QThread):
         import tempfile, os, sys, subprocess
         temp_wav = None
         try:
-            ext = os.path.splitext(self.file_path)[1].lower()
-            creationflags = 0
-            if sys.platform == "win32":
-                creationflags = subprocess.CREATE_NO_WINDOW
-            # Luôn chuyển đổi sang wav chuẩn PCM 16-bit mono bằng ffmpeg
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             tmp_wav = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
             tmp_wav.close()
             cmd = [self.ffmpeg_path, '-y', '-i', self.file_path, '-acodec', 'pcm_s16le', '-ac', '1', '-ar', '16000', tmp_wav.name]
             subprocess.run(cmd, check=True, creationflags=creationflags)
             temp_wav = tmp_wav.name
-            self.file_path = temp_wav
             recognizer = sr.Recognizer()
-            with sr.AudioFile(self.file_path) as source:
+            with sr.AudioFile(temp_wav) as source:
                 audio = recognizer.record(source)
             text = recognizer.recognize_google(audio, language='vi-VN')
             self.result.emit(text)
@@ -229,432 +141,419 @@ class STTFileWorker(QThread):
 class TTSApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Chuyển văn bản thành giọng nói")
-        self.setGeometry(100, 100, 1000, 600)
-        self.media_player = QMediaPlayer()
-        self.current_audio_file = None
-        self.is_paused = False
-        self.loading_label = None
-        self.audio_files = []  # Danh sách các file tạm [{'name':..., 'path':...}]
+        self.setWindowTitle("Vietnamese TTS")
+        self.resize(1000, 700)
+        self.temp_dir = tempfile.mkdtemp(prefix="tts_app_")
+        
+        self.audio_output = QAudioOutput()
+        self.player = QMediaPlayer()
+        self.player.setAudioOutput(self.audio_output)
+        self.player.errorOccurred.connect(self.player_error)
+
+        self.audio_files = []
+        self.statusBar = QStatusBar()
+        self.setStatusBar(self.statusBar)
         self.init_ui()
 
     def init_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
-        # Bên trái: tabs nhập văn bản
+
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        tabs = QTabWidget()
-        left_layout.addWidget(tabs)
-        # Edge TTS tab
+        self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+        
         edge_tab = QWidget()
-        edge_layout = QVBoxLayout(edge_tab)
-        self.text_input = QTextEdit()
-        edge_layout.addWidget(QLabel("Nhập văn bản:"))
-        edge_layout.addWidget(self.text_input)
-        voice_layout = QHBoxLayout()
-        voice_layout.addWidget(QLabel("Chọn giọng đọc:"))
-        self.voice_combo = QComboBox()
-        try:
-            # Thử lấy danh sách giọng đọc từ API
-            voices = get_available_voices()
-            self.voice_combo.addItems([f"{code} - {name}" for code, name in voices.items()])
-        except Exception:
-            # Nếu không lấy được thì dùng danh sách mặc định
-            self.voice_combo.addItems([f"{code} - {name}" for code, name in VOICE_LIST.items()])
-        voice_layout.addWidget(self.voice_combo)
-        edge_layout.addLayout(voice_layout)
-        edge_file_layout = QHBoxLayout()
-        self.edge_import_button = QPushButton("Nhập file văn bản")
-        self.edge_import_button.clicked.connect(self.import_edge_files)
-        edge_file_layout.addWidget(self.edge_import_button)
-        edge_layout.addLayout(edge_file_layout)
-        button_layout = QHBoxLayout()
-        self.speak_button = QPushButton("Đọc thử")
-        self.speak_button.clicked.connect(self.speak_edge)
-        button_layout.addWidget(self.speak_button)
-        edge_layout.addLayout(button_layout)
-        edge_tab.setLayout(edge_layout)
-        # Google TTS (gtts) tab
+        self.init_edge_tts_tab(edge_tab)
+        self.tabs.addTab(edge_tab, "Edge TTS")
+
         google_tab = QWidget()
-        google_layout = QVBoxLayout(google_tab)
-        self.gtts_text_input = QTextEdit()
-        google_layout.addWidget(QLabel("Nhập văn bản:"))
-        google_layout.addWidget(self.gtts_text_input)
-        gtts_lang_layout = QHBoxLayout()
-        gtts_lang_layout.addWidget(QLabel("Ngôn ngữ:"))
-        self.gtts_lang_combo = QComboBox()
-        self.gtts_lang_combo.addItems(["vi", "en"])
-        gtts_lang_layout.addWidget(self.gtts_lang_combo)
-        google_layout.addLayout(gtts_lang_layout)
-        gtts_file_layout = QHBoxLayout()
-        self.gtts_import_button = QPushButton("Nhập file văn bản")
-        self.gtts_import_button.clicked.connect(self.import_gtts_files)
-        gtts_file_layout.addWidget(self.gtts_import_button)
-        google_layout.addLayout(gtts_file_layout)
-        gtts_button_layout = QHBoxLayout()
-        self.gtts_speak_button = QPushButton("Đọc thử")
-        self.gtts_speak_button.clicked.connect(self.speak_gtts)
-        gtts_button_layout.addWidget(self.gtts_speak_button)
-        google_layout.addLayout(gtts_button_layout)
-        google_tab.setLayout(google_layout)
-        tabs.addTab(edge_tab, "Edge TTS")
-        tabs.addTab(google_tab, "Google TTS (gtts)")
-        # Thêm tab Speech to Text (STT)
+        self.init_gtts_tab(google_tab)
+        self.tabs.addTab(google_tab, "Google TTS (gtts)")
+
         stt_tab = QWidget()
-        stt_layout = QVBoxLayout(stt_tab)
-        self.stt_result = QTextEdit()
-        self.stt_result.setPlaceholderText("Kết quả nhận diện sẽ hiển thị ở đây...")
-        stt_layout.addWidget(self.stt_result)
-        stt_btn_layout = QHBoxLayout()
-        self.stt_file_btn = QPushButton("Nhận diện từ file âm thanh")
-        self.stt_file_btn.clicked.connect(self.stt_from_file)
-        stt_btn_layout.addWidget(self.stt_file_btn)
-        self.stt_mic_start_btn = QPushButton("Bắt đầu ghi")
-        self.stt_mic_start_btn.clicked.connect(self.start_mic_recording)
-        stt_btn_layout.addWidget(self.stt_mic_start_btn)
-        self.stt_mic_stop_btn = QPushButton("Dừng ghi")
-        self.stt_mic_stop_btn.clicked.connect(self.stop_mic_recording)
-        self.stt_mic_stop_btn.setEnabled(False)
-        stt_btn_layout.addWidget(self.stt_mic_stop_btn)
-        stt_layout.addLayout(stt_btn_layout)
-        self.stt_countdown_label = QLabel("")
-        font = self.stt_countdown_label.font()
-        font.setPointSize(36)
-        font.setBold(True)
-        self.stt_countdown_label.setFont(font)
-        self.stt_countdown_label.setAlignment(Qt.AlignCenter)
-        stt_layout.addWidget(self.stt_countdown_label)
-        # Nút lưu văn bản
-        self.stt_save_btn = QPushButton("Lưu văn bản...")
-        self.stt_save_btn.clicked.connect(self.save_stt_text)
-        stt_layout.addWidget(self.stt_save_btn)
-        stt_tab.setLayout(stt_layout)
-        tabs.addTab(stt_tab, "Speech to Text (STT)")
-        # Loading label
-        self.loading_label = QLabel("")
-        self.loading_label.setAlignment(Qt.AlignCenter)
-        left_layout.addWidget(self.loading_label)
-        left_widget.setLayout(left_layout)
+        self.init_stt_tab(stt_tab)
+        self.tabs.addTab(stt_tab, "Speech to Text (STT)")
+
+        gemini_tab = QWidget()
+        self.init_gemini_tab(gemini_tab)
+        self.tabs.addTab(gemini_tab, "Gemini AI")
+
+        left_layout.addWidget(self.tabs)
         main_layout.addWidget(left_widget, 2)
-        # Bên phải: danh sách file âm thanh tạm và các nút thao tác
+
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.addWidget(QLabel("Danh sách file âm thanh tạm:"))
-        self.audio_list = QListWidget()
-        self.audio_list.itemSelectionChanged.connect(self.on_audio_selected)
-        right_layout.addWidget(self.audio_list)
+        self.audio_list_widget = QListWidget()
+        self.audio_list_widget.itemClicked.connect(self.on_audio_selected)
+        right_layout.addWidget(self.audio_list_widget)
+        
         audio_btn_layout = QHBoxLayout()
         self.play_button = QPushButton("Phát")
-        self.play_button.clicked.connect(self.play_or_pause_audio)
-        self.save_button = QPushButton("Lưu file âm thanh")
-        self.save_button.clicked.connect(self.save_selected_audio)
-        self.delete_button = QPushButton("Xóa file tạm")
-        self.delete_button.clicked.connect(self.delete_selected_audio)
+        self.play_button.clicked.connect(self.play_selected_audio)
+        self.save_audio_button = QPushButton("Lưu file âm thanh")
+        self.save_audio_button.clicked.connect(self.save_selected_audio)
+        self.delete_audio_button = QPushButton("Xóa file tạm")
+        self.delete_audio_button.clicked.connect(self.delete_selected_audio)
         audio_btn_layout.addWidget(self.play_button)
-        audio_btn_layout.addWidget(self.save_button)
-        audio_btn_layout.addWidget(self.delete_button)
+        audio_btn_layout.addWidget(self.save_audio_button)
+        audio_btn_layout.addWidget(self.delete_audio_button)
         right_layout.addLayout(audio_btn_layout)
-        right_widget.setLayout(right_layout)
         main_layout.addWidget(right_widget, 1)
+
+    def closeEvent(self, event):
+        self.gemini_view.setPage(None)
+        self.gemini_page.deleteLater()
+        self.gemini_profile.deleteLater()
+        super().closeEvent(event)
+
+    def on_tab_changed(self, index):
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.stop()
+            self.play_button.setText("Phát")
 
     def add_audio_file(self, name, path):
         self.audio_files.append({'name': name, 'path': path})
-        self.audio_list.addItem(name)
-        self.audio_list.setCurrentRow(self.audio_list.count()-1)
+        self.audio_list_widget.addItem(QListWidgetItem(name))
 
     def on_audio_selected(self):
-        idx = self.audio_list.currentRow()
-        if idx >= 0 and idx < len(self.audio_files):
-            self.current_audio_file = self.audio_files[idx]['path']
-        # Reset nút về 'Phát' khi chọn file khác
-        self.play_button.setText("Phát")
-        self.is_paused = False
+        idx = self.audio_list_widget.currentRow()
+        if idx >= 0:
+            path = self.audio_files[idx]['path']
+            self.play_audio(path)
 
-    def play_or_pause_audio(self):
-        if not self.current_audio_file:
+    def play_selected_audio(self):
+        idx = self.audio_list_widget.currentRow()
+        if idx < 0:
             return
-        if self.media_player.state() == QMediaPlayer.PlayingState:
-            self.media_player.pause()
-            self.is_paused = True
+        path = self.audio_files[idx]['path']
+        if self.player.source() == QUrl.fromLocalFile(path) and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
             self.play_button.setText("Phát")
+        elif self.player.source() == QUrl.fromLocalFile(path) and self.player.playbackState() == QMediaPlayer.PlaybackState.PausedState:
+            self.player.play()
+            self.play_button.setText("Tạm dừng")
         else:
-            self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.current_audio_file)))
-            self.media_player.play()
-            self.is_paused = False
+            self.play_audio(path)
+            
+    def play_audio(self, path):
+        if path:
+            self.player.setSource(QUrl.fromLocalFile(path))
+            self.player.play()
             self.play_button.setText("Tạm dừng")
 
     def save_selected_audio(self):
-        idx = self.audio_list.currentRow()
-        if idx >= 0 and idx < len(self.audio_files):
-            audio = self.audio_files[idx]
-            ext = os.path.splitext(audio['path'])[1]
-            file_path, selected_filter = QFileDialog.getSaveFileName(
-                self, "Lưu file âm thanh", audio['name']+ext,
-                "WAV (*.wav);;MP3 (*.mp3);;OGG (*.ogg);;FLAC (*.flac)")
-            if file_path:
-                try:
-                    from pydub import AudioSegment
-                    # Xác định định dạng đích
-                    if selected_filter == 'WAV (*.wav)' or file_path.endswith('.wav'):
-                        with open(audio['path'], 'rb') as src, open(file_path, 'wb') as dst:
-                            dst.write(src.read())
-                    else:
-                        # Chuyển đổi sang định dạng khác bằng pydub
-                        sound = AudioSegment.from_file(audio['path'])
-                        if selected_filter == 'MP3 (*.mp3)' or file_path.endswith('.mp3'):
-                            sound.export(file_path, format='mp3')
-                        elif selected_filter == 'OGG (*.ogg)' or file_path.endswith('.ogg'):
-                            sound.export(file_path, format='ogg')
-                        elif selected_filter == 'FLAC (*.flac)' or file_path.endswith('.flac'):
-                            sound.export(file_path, format='flac')
-                        else:
-                            raise Exception('Định dạng không hỗ trợ!')
-                except Exception as e:
-                    QMessageBox.warning(self, "Lỗi", f"Không thể lưu file: {e}")
+        idx = self.audio_list_widget.currentRow()
+        if idx < 0:
+            return
+        audio = self.audio_files[idx]
+        ext = os.path.splitext(audio['path'])[1]
+        file_path, _ = QFileDialog.getSaveFileName(self, "Lưu file âm thanh", audio['name']+ext, f"{ext.upper().replace('.','')} Files (*{ext})")
+        if file_path:
+            try:
+                with open(audio['path'], 'rb') as src, open(file_path, 'wb') as dst:
+                    dst.write(src.read())
+                self.statusBar.showMessage(f"Đã lưu file thành công tới: {file_path}", 5000)
+            except Exception as e:
+                QMessageBox.warning(self, "Lỗi", f"Không thể lưu file: {e}")
 
     def delete_selected_audio(self):
-        idx = self.audio_list.currentRow()
-        if idx >= 0 and idx < len(self.audio_files):
-            audio = self.audio_files.pop(idx)
-            try:
-                os.remove(audio['path'])
-            except Exception:
-                pass
-            self.audio_list.takeItem(idx)
-            if self.audio_files:
-                self.audio_list.setCurrentRow(0)
-            else:
-                self.current_audio_file = None
-
-    def import_edge_files(self):
-        self.import_files(is_edge=True)
-    def import_gtts_files(self):
-        self.import_files(is_edge=False)
-    def import_files(self, is_edge):
-        files, _ = QFileDialog.getOpenFileNames(self, "Chọn file văn bản", "", "Text files (*.txt *.docx)")
-        if not files:
+        idx = self.audio_list_widget.currentRow()
+        if idx < 0:
             return
-        for file in files:
-            text = self.read_text_file(file)
-            dlg = EditTextDialog(file, text, self)
-            if dlg.exec_() == QDialog.Accepted:
-                edited_text = dlg.get_text()
-                if is_edge:
-                    self.process_edge_file(file, edited_text)
-                else:
-                    self.process_gtts_file(file, edited_text)
-    def read_text_file(self, file):
-        if file.lower().endswith('.txt'):
-            with open(file, 'r', encoding='utf-8') as f:
-                return f.read()
-        elif file.lower().endswith('.docx'):
-            doc = Document(file)
-            return '\n'.join([p.text for p in doc.paragraphs])
-        return ""
-    def process_edge_file(self, file, text):
-        voice_code = self.voice_combo.currentText().split(' - ')[0]  # Lấy mã giọng đọc từ combobox
-        self.show_loading(True)
-        self.edge_worker = EdgeTTSWorker(text, voice_code)
-        self.edge_worker.finished.connect(lambda temp_path: self.on_edge_file_ready(temp_path, file))
-        self.edge_worker.start()
+        audio = self.audio_files.pop(idx)
+        self.audio_list_widget.takeItem(idx)
+        try:
+            os.remove(audio['path'])
+        except OSError:
+            pass
+        if not self.audio_files:
+            self.play_button.setText("Phát")
 
-    def on_edge_file_ready(self, temp_path, file):
-        self.show_loading(False)
-        name = os.path.basename(file) + " (Edge)"
-        self.add_audio_file(name, temp_path)
-        self.play_audio()
+    def player_error(self, error, error_string):
+        QMessageBox.critical(self, "Lỗi Media Player", f"Gặp lỗi khi phát file:\n{error_string}")
+        self.play_button.setText("Phát")
+        
+    def on_tts_error(self, error_message):
+        self.statusBar.showMessage(f"Lỗi khi tạo âm thanh: {error_message}", 5000)
+        self.read_aloud_button.setEnabled(True)
+        self.gtts_speak_button.setEnabled(True)
 
-    def process_gtts_file(self, file, text):
-        lang = self.gtts_lang_combo.currentText()
-        self.show_loading(True)
-        self.gtts_worker = GttsWorker(text, lang)
-        self.gtts_worker.finished.connect(lambda temp_path: self.on_gtts_file_ready(temp_path, file))
-        self.gtts_worker.start()
+    # --- Edge TTS Tab ---
+    def init_edge_tts_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        self.text_input = QTextEdit()
+        self.text_input.setPlaceholderText("Nhập văn bản cần chuyển đổi tại đây...")
+        layout.addWidget(self.text_input)
 
-    def on_gtts_file_ready(self, temp_path, file):
-        self.show_loading(False)
-        name = os.path.basename(file) + " (Google)"
-        self.add_audio_file(name, temp_path)
-        self.play_audio()
+        voice_layout = QHBoxLayout()
+        voice_layout.addWidget(QLabel("Chọn giọng đọc:"))
+        self.voice_combo = QComboBox()
+        voice_layout.addWidget(self.voice_combo)
+        layout.addLayout(voice_layout)
 
-    def show_loading(self, show=True):
-        if show:
-            self.loading_label.setText("Đang xử lý, vui lòng chờ...")
-        else:
-            self.loading_label.setText("")
+        import_button = QPushButton("Nhập File Văn Bản (.txt, .pdf, .docx)")
+        import_button.clicked.connect(self.import_text_file)
+        layout.addWidget(import_button)
 
-    def speak_edge(self):
+        self.loading_label = QLabel("Đang tải danh sách giọng đọc...")
+        self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.loading_label)
+
+        button_layout = QHBoxLayout()
+        self.read_aloud_button = QPushButton("Đọc thử")
+        self.read_aloud_button.setEnabled(False)
+        self.read_aloud_button.clicked.connect(self.generate_speech)
+        button_layout.addWidget(self.read_aloud_button)
+        layout.addLayout(button_layout)
+        
+        self.voice_loader_worker = EdgeTTSWorker(load_voices_only=True)
+        self.voice_loader_worker.voices_loaded.connect(self.populate_voices)
+        self.voice_loader_worker.error.connect(self.on_voice_load_error)
+        self.voice_loader_worker.start()
+        
+    def generate_speech(self):
         text = self.text_input.toPlainText().strip()
         if not text:
-            QMessageBox.warning(self, "Cảnh báo", "Vui lòng nhập văn bản cần đọc.")
             return
-        voice_code = self.voice_combo.currentText().split(' - ')[0]  # Lấy mã giọng đọc từ combobox
-        self.show_loading(True)
-        self.edge_worker = EdgeTTSWorker(text, voice_code)
-        self.edge_worker.finished.connect(self.on_edge_tts_finished)
+        voice = self.voice_combo.currentData()
+        if not voice:
+            QMessageBox.warning(self, "Lỗi", "Giọng đọc chưa được chọn hoặc không hợp lệ.")
+            return
+            
+        filename = f"edge_tts_{uuid.uuid4().hex[:8]}.mp3"
+        output_file = os.path.join(self.temp_dir, filename)
+        
+        self.statusBar.showMessage("Đang xử lý, vui lòng chờ...")
+        self.read_aloud_button.setEnabled(False)
+
+        self.edge_worker = EdgeTTSWorker(text=text, voice=voice, output_file=output_file)
+        self.edge_worker.finished.connect(lambda: self.on_edge_tts_finished(output_file))
+        self.edge_worker.error.connect(self.on_tts_error)
         self.edge_worker.start()
 
-    def on_edge_tts_finished(self, file_path):
-        self.current_audio_file = file_path
-        self.show_loading(False)
-        # Thêm file tạm vào danh sách
-        name = f"TTS_{os.path.basename(file_path)}"
-        self.add_audio_file(name, file_path)
-        self.play_audio()
+    def on_edge_tts_finished(self, path):
+        self.statusBar.showMessage(f"Đã tạo file thành công: {os.path.basename(path)}", 5000)
+        self.read_aloud_button.setEnabled(True)
+        self.add_audio_file(os.path.basename(path), path)
+        self.play_audio(path)
 
-    def speak_gtts(self):
-        text = self.gtts_text_input.toPlainText()
-        lang = self.gtts_lang_combo.currentText()
-        if not text:
+    def populate_voices(self, voices):
+        self.loading_label.setText("")
+        filtered_voices = [v for v in voices if v.get('Locale','').startswith('vi-') or 'Multilingual' in v.get('ShortName','')]
+        if not filtered_voices:
+            self.loading_label.setText("Không tìm thấy giọng đọc phù hợp.")
             return
-        self.show_loading(True)
+            
+        def sort_key(v):
+            return (0, v['ShortName']) if 'hoaimy' in v['ShortName'].lower() or 'namminh' in v['ShortName'].lower() else (1, v['ShortName'])
+        filtered_voices.sort(key=sort_key)
+        
+        for voice in filtered_voices:
+            self.voice_combo.addItem(f"{voice.get('ShortName')} - {voice.get('FriendlyName')}", voice.get('ShortName'))
+        self.read_aloud_button.setEnabled(True)
+
+    def on_voice_load_error(self, msg):
+        self.loading_label.setText(f"Lỗi tải giọng đọc: {msg}")
+        self.loading_label.setStyleSheet("color: red;")
+
+    def import_text_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Chọn file văn bản", "", "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Documents (*.docx)")
+        if not file_path: return
+        content = ""
+        try:
+            if file_path.lower().endswith('.txt'):
+                with open(file_path, 'r', encoding='utf-8') as f: content = f.read()
+            elif file_path.lower().endswith('.pdf'):
+                with fitz.open(file_path) as doc: content = "".join(page.get_text() for page in doc)
+            elif file_path.lower().endswith('.docx'):
+                doc = docx.Document(file_path)
+                content = "\n".join(para.text for para in doc.paragraphs)
+            self.text_input.setPlainText(content)
+            self.statusBar.showMessage(f"Đã tải thành công: {os.path.basename(file_path)}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi Đọc File", f"Không thể đọc file.\nLỗi: {e}")
+
+    # --- Google TTS Tab ---
+    def init_gtts_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        self.gtts_text_input = QTextEdit()
+        layout.addWidget(QLabel("Nhập văn bản:"))
+        layout.addWidget(self.gtts_text_input)
+        
+        lang_layout = QHBoxLayout()
+        lang_layout.addWidget(QLabel("Ngôn ngữ:"))
+        self.gtts_lang_combo = QComboBox()
+        self.gtts_lang_combo.addItems(["vi", "en", "fr", "de", "es"])
+        lang_layout.addWidget(self.gtts_lang_combo)
+        layout.addLayout(lang_layout)
+
+        self.gtts_speak_button = QPushButton("Tạo và Đọc thử")
+        self.gtts_speak_button.clicked.connect(self.speak_gtts)
+        layout.addWidget(self.gtts_speak_button)
+        
+    def speak_gtts(self):
+        text = self.gtts_text_input.toPlainText().strip()
+        if not text: return
+        lang = self.gtts_lang_combo.currentText()
+        
+        self.gtts_speak_button.setEnabled(False)
+        self.statusBar.showMessage("Đang xử lý với Google TTS...")
         self.gtts_worker = GttsWorker(text, lang)
         self.gtts_worker.finished.connect(self.on_gtts_finished)
+        self.gtts_worker.error.connect(self.on_tts_error)
         self.gtts_worker.start()
 
-    def on_gtts_finished(self, file_path):
-        self.current_audio_file = file_path
-        self.show_loading(False)
-        # Thêm file tạm vào danh sách
-        name = f"TTS_{os.path.basename(file_path)}"
-        self.add_audio_file(name, file_path)
-        self.play_audio()
+    def on_gtts_finished(self, path):
+        name = os.path.basename(path)
+        self.statusBar.showMessage(f"Google TTS tạo file thành công: {name}", 5000)
+        self.gtts_speak_button.setEnabled(True)
+        self.add_audio_file(name, path)
+        self.play_audio(path)
 
-    def play_audio(self):
-        if self.current_audio_file:
-            self.media_player.setMedia(QMediaContent(QUrl.fromLocalFile(self.current_audio_file)))
-            self.media_player.play()
-            self.is_paused = False
-            self.play_button.setText("Tạm dừng")
+    # --- STT Tab ---
+    def init_stt_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        self.stt_result = QTextEdit()
+        self.stt_result.setPlaceholderText("Kết quả nhận diện sẽ hiển thị ở đây...")
+        layout.addWidget(self.stt_result)
 
-    def pause_or_resume_audio(self):
-        # Không còn dùng nữa, giữ lại cho tương thích nếu gọi từ nơi khác
-        self.play_or_pause_audio()
-
-    def stop_and_clear(self):
-        self.media_player.stop()
-        if self.current_audio_file and self.current_audio_file.endswith('.mp3'):
-            reply = QMessageBox.question(self, 'Lưu file?',
-                                         'Bạn có muốn lưu file mp3 vừa tạo không?',
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                file_path, _ = QFileDialog.getSaveFileName(
-                    self, "Lưu file âm thanh", "", "MP3 Files (*.mp3)")
-                if file_path:
-                    try:
-                        with open(self.current_audio_file, 'rb') as src, open(file_path, 'wb') as dst:
-                            dst.write(src.read())
-                    except Exception as e:
-                        QMessageBox.warning(self, "Lỗi", f"Không thể lưu file: {e}")
-        self.text_input.clear()
-        self.gtts_text_input.clear()
-        self.current_audio_file = None
-        self.is_paused = False
-        self.play_button.setText("Phát")
-        self.show_loading(False)
+        btn_layout = QHBoxLayout()
+        self.stt_file_btn = QPushButton("Nhận diện từ file")
+        self.stt_file_btn.clicked.connect(self.stt_from_file)
+        btn_layout.addWidget(self.stt_file_btn)
+        
+        self.stt_save_btn = QPushButton("Lưu văn bản...")
+        self.stt_save_btn.clicked.connect(self.save_stt_text)
+        btn_layout.addWidget(self.stt_save_btn)
+        layout.addLayout(btn_layout)
 
     def stt_from_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Chọn file âm thanh", "", "Audio Files (*.wav *.mp3 *.flac *.aiff *.ogg)")
-        if not file_path:
-            return
+        file_path, _ = QFileDialog.getOpenFileName(self, "Chọn file âm thanh", "", "Audio Files (*.wav *.mp3 *.m4a *.ogg)")
+        if not file_path: return
         self.stt_result.setPlainText("Đang xử lý file âm thanh...")
         self.stt_file_btn.setEnabled(False)
-        self.stt_mic_start_btn.setEnabled(False)
-        self.stt_mic_stop_btn.setEnabled(False)
         self.stt_worker = STTFileWorker(file_path, ffmpeg_path)
-        self.stt_worker.result.connect(self.on_stt_file_result)
-        self.stt_worker.error.connect(self.on_stt_file_error)
-        self.stt_worker.finished.connect(self.on_stt_file_finished)
+        self.stt_worker.result.connect(self.on_stt_result)
+        self.stt_worker.error.connect(self.on_stt_error)
+        self.stt_worker.finished.connect(lambda: self.stt_file_btn.setEnabled(True))
         self.stt_worker.start()
 
-    def on_stt_file_result(self, text):
+    def on_stt_result(self, text):
         self.stt_result.setPlainText(text)
 
-    def on_stt_file_error(self, msg):
+    def on_stt_error(self, msg):
         self.stt_result.setPlainText(msg)
-
-    def on_stt_file_finished(self):
-        self.stt_file_btn.setEnabled(True)
-        self.stt_mic_start_btn.setEnabled(True)
-        self.stt_mic_stop_btn.setEnabled(False)
-
-    def start_mic_recording(self):
-        self.stt_result.setPlainText("")
-        self.stt_countdown_label.setText("")
-        self.stt_mic_start_btn.setEnabled(False)
-        self.stt_mic_stop_btn.setEnabled(False)
-        self._countdown = 3
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._update_countdown)
-        self._update_countdown()
-        self._timer.start(1000)
-
-    def _update_countdown(self):
-        if self._countdown > 0:
-            self.stt_countdown_label.setText(str(self._countdown))
-            self._countdown -= 1
-        else:
-            self.stt_countdown_label.setText("")
-            self._timer.stop()
-            self._start_mic_worker()
-
-    def _start_mic_worker(self):
-        self.stt_result.setPlainText("Đang nghe... Nhấn 'Dừng ghi' để kết thúc.")
-        self.stt_mic_start_btn.setEnabled(False)
-        self.stt_mic_stop_btn.setEnabled(True)
-        self.mic_worker = MicrophoneWorker()
-        self.mic_worker.result.connect(self.on_mic_result)
-        self.mic_worker.error.connect(self.on_mic_error)
-        self.mic_worker.listening.connect(self.on_mic_listening)
-        self.mic_worker.start()
-
-    def stop_mic_recording(self):
-        if hasattr(self, 'mic_worker') and self.mic_worker.isRunning():
-            self.mic_worker.stop()
-            self.stt_result.append("\nĐang xử lý...")
-        self.stt_mic_start_btn.setEnabled(True)
-        self.stt_mic_stop_btn.setEnabled(False)
-
-    def on_mic_result(self, text):
-        self.stt_result.setPlainText(text)
-        self.stt_mic_start_btn.setEnabled(True)
-        self.stt_mic_stop_btn.setEnabled(False)
-
-    def on_mic_error(self, msg):
-        self.stt_result.setPlainText(msg)
-        self.stt_mic_start_btn.setEnabled(True)
-        self.stt_mic_stop_btn.setEnabled(False)
-
-    def on_mic_listening(self, listening):
-        if listening:
-            self.stt_result.setPlainText("Đang nghe... Nhấn 'Dừng ghi' để kết thúc.")
-        else:
-            self.stt_result.append("\nĐang xử lý...")
 
     def save_stt_text(self):
         text = self.stt_result.toPlainText().strip()
-        if not text:
-            QMessageBox.warning(self, "Cảnh báo", "Không có văn bản để lưu!")
-            return
-        file_path, ext = QFileDialog.getSaveFileName(self, "Lưu văn bản", "stt_result", "Text file (*.txt);;Word file (*.docx)")
-        if not file_path:
-            return
-        if ext == 'Text file (*.txt)' or file_path.endswith('.txt'):
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(text)
-        elif ext == 'Word file (*.docx)' or file_path.endswith('.docx'):
-            from docx import Document
-            doc = Document()
-            for line in text.splitlines():
-                doc.add_paragraph(line)
-            doc.save(file_path)
+        if not text: return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Lưu văn bản", "stt_result.txt", "Text Files (*.txt);;Word Documents (*.docx)")
+        if not file_path: return
+        try:
+            if file_path.endswith('.docx'):
+                doc = docx.Document()
+                doc.add_paragraph(text)
+                doc.save(file_path)
+            else:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+            self.statusBar.showMessage("Lưu file thành công!", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi Lưu File", f"Không thể lưu file.\nLỗi: {e}")
+
+    # --- Gemini Tab ---
+    def init_gemini_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        
+        self.gemini_view = QWebEngineView()
+        self.gemini_profile = QWebEngineProfile("gemini_profile", self.gemini_view)
+        self.gemini_profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+        self.gemini_page = GeminiWebPage(self.gemini_profile, self.gemini_view)
+        self.gemini_view.setPage(self.gemini_page)
+        
+        control_layout = QHBoxLayout()
+        self.gemini_import_cookie_btn = QPushButton("🍪 Nhập Cookie")
+        self.gemini_import_cookie_btn.clicked.connect(self.import_gemini_cookies)
+        control_layout.addWidget(self.gemini_import_cookie_btn)
+        self.gemini_refresh_btn = QPushButton("Làm mới")
+        self.gemini_refresh_btn.clicked.connect(self.gemini_view.reload)
+        control_layout.addWidget(self.gemini_refresh_btn)
+        self.gemini_back_btn = QPushButton("Quay lại")
+        self.gemini_back_btn.clicked.connect(self.gemini_view.back)
+        control_layout.addWidget(self.gemini_back_btn)
+        self.gemini_forward_btn = QPushButton("Tiến tới")
+        self.gemini_forward_btn.clicked.connect(self.gemini_view.forward)
+        control_layout.addWidget(self.gemini_forward_btn)
+        
+        layout.addLayout(control_layout)
+        layout.addWidget(self.gemini_view)
+        
+        copy_tts_btn = QPushButton("Sao chép vào TTS")
+        copy_tts_btn.clicked.connect(self.extract_and_convert_gemini_text)
+        layout.addWidget(copy_tts_btn)
+        
+        self.gemini_view.load(QUrl("https://gemini.google.com"))
+
+    def import_gemini_cookies(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Chọn file Cookie Export", "", "JSON Files (*.json)")
+        if not file_path: return
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                cookies_data = json.load(f)
+            
+            cookie_store = self.gemini_page.profile().cookieStore()
+            # Xóa tất cả các cookie cũ để đảm bảo không bị xung đột
+            cookie_store.deleteAllCookies()
+
+            count = 0
+            for cookie in cookies_data:
+                if 'google.com' not in cookie.get('domain', ''): continue
+                
+                # Tạo QNetworkCookie từ dữ liệu JSON
+                q_cookie = QNetworkCookie(
+                    cookie.get('name', '').encode(),
+                    cookie.get('value', '').encode()
+                )
+                q_cookie.setDomain(cookie.get('domain', ''))
+                q_cookie.setPath(cookie.get('path', '/'))
+
+                if 'expirationDate' in cookie and cookie['expirationDate']:
+                    q_cookie.setExpirationDate(QDateTime.fromSecsSinceEpoch(int(cookie['expirationDate'])))
+                
+                q_cookie.setHttpOnly(cookie.get('httpOnly', False))
+                q_cookie.setSecure(cookie.get('secure', False))
+
+                # Thuộc tính sameSite không được hỗ trợ trong phiên bản PyQt6 này nên đã bị loại bỏ
+
+                cookie_store.setCookie(q_cookie)
+                count += 1
+            
+            self.statusBar.showMessage(f"Đã nhập {count} cookie. Đang tải lại...", 3000)
+            # Dùng QTimer để chờ một chút cho cookie store xử lý xong trước khi reload
+            QTimer.singleShot(1000, self.gemini_view.reload)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi Nhập Cookie", f"Không thể xử lý file cookie.\nLỗi: {e}")
+
+    def extract_and_convert_gemini_text(self):
+        self.statusBar.showMessage("Đang trích xuất văn bản từ Gemini...", 3000)
+        js_code = "Array.from(document.querySelectorAll('.markdown')).pop().innerText;"
+        self.gemini_view.page().runJavaScript(js_code, self.on_gemini_text_extracted)
+
+    def on_gemini_text_extracted(self, text):
+        if text and text.strip():
+            self.text_input.setPlainText(text.strip())
+            self.tabs.setCurrentIndex(0) # Chuyển qua tab Edge TTS
+            self.statusBar.showMessage("Đã sao chép văn bản vào tab Edge TTS!", 5000)
         else:
-            QMessageBox.warning(self, "Lỗi", "Định dạng file không hỗ trợ!")
+            self.statusBar.showMessage("Không tìm thấy nội dung trả lời của AI.", 5000)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = TTSApp()
     window.show()
-    sys.exit(app.exec_()) 
+    sys.exit(app.exec()) 

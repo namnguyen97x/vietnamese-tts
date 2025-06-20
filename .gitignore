@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environment
+.env
+.venv
+venv/
+ENV/
+env/
+venv.bak/
+
+# Project-specific
+gemini_profile/
+/bin/
+*.mp3
+*.wav
+/dist/
+/build/
+*.spec 

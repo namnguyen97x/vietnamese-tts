@@ -2,7 +2,9 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ main ]
+    branches: 
+      - main
+      - feature/build-and-docs
   workflow_dispatch:
   release:
     types: [created]
