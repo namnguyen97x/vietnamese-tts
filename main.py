@@ -26,6 +26,7 @@ import numpy as np
 import wave
 import docx
 import fitz
+from PyQt6.QtGui import QGuiApplication
 
 def get_bin_dir():
     if getattr(sys, 'frozen', False):
@@ -144,13 +145,13 @@ class TTSApp(QMainWindow):
         self.setWindowTitle("Vietnamese TTS")
         self.resize(1000, 700)
         self.temp_dir = tempfile.mkdtemp(prefix="tts_app_")
+        self.temp_files = []
         
         self.audio_output = QAudioOutput()
         self.player = QMediaPlayer()
         self.player.setAudioOutput(self.audio_output)
         self.player.errorOccurred.connect(self.player_error)
 
-        self.audio_files = []
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
         self.init_ui()
@@ -177,30 +178,45 @@ class TTSApp(QMainWindow):
         self.init_stt_tab(stt_tab)
         self.tabs.addTab(stt_tab, "Speech to Text (STT)")
 
-        gemini_tab = QWidget()
-        self.init_gemini_tab(gemini_tab)
-        self.tabs.addTab(gemini_tab, "Gemini AI")
+        ai_chat_tab = QWidget()
+        ai_chat_layout = QVBoxLayout(ai_chat_tab)
+        self.ai_subtabs = QTabWidget()
+
+        # Tab Gemini
+        self.gemini_inner_tab = QWidget()
+        self.init_gemini_tab(self.gemini_inner_tab)
+        self.ai_subtabs.addTab(self.gemini_inner_tab, "Gemini")
+
+        # Tab ChatGPT
+        self.chatgpt_inner_tab = QWidget()
+        self.init_chatgpt_tab(self.chatgpt_inner_tab)
+        self.ai_subtabs.addTab(self.chatgpt_inner_tab, "ChatGPT")
+
+        ai_chat_layout.addWidget(self.ai_subtabs)
+        self.tabs.addTab(ai_chat_tab, "AI chat")
 
         left_layout.addWidget(self.tabs)
         main_layout.addWidget(left_widget, 2)
 
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-        right_layout.addWidget(QLabel("Danh sách file âm thanh tạm:"))
-        self.audio_list_widget = QListWidget()
-        self.audio_list_widget.itemClicked.connect(self.on_audio_selected)
-        right_layout.addWidget(self.audio_list_widget)
+        right_layout.addWidget(QLabel("Danh sách file tạm:"))
+        self.temp_file_list_widget = QListWidget()
+        self.temp_file_list_widget.itemClicked.connect(self.on_temp_file_selected)
+        right_layout.addWidget(self.temp_file_list_widget)
         
         audio_btn_layout = QHBoxLayout()
         self.play_button = QPushButton("Phát")
-        self.play_button.clicked.connect(self.play_selected_audio)
-        self.save_audio_button = QPushButton("Lưu file âm thanh")
-        self.save_audio_button.clicked.connect(self.save_selected_audio)
-        self.delete_audio_button = QPushButton("Xóa file tạm")
-        self.delete_audio_button.clicked.connect(self.delete_selected_audio)
+        self.play_button.setEnabled(False)
+        self.play_button.clicked.connect(self.play_selected_file)
+        self.save_file_button = QPushButton("Lưu file")
+        self.save_file_button.setEnabled(False)
+        self.save_file_button.clicked.connect(self.save_selected_file)
+        self.delete_file_button = QPushButton("Xóa file tạm")
+        self.delete_file_button.clicked.connect(self.delete_selected_file)
         audio_btn_layout.addWidget(self.play_button)
-        audio_btn_layout.addWidget(self.save_audio_button)
-        audio_btn_layout.addWidget(self.delete_audio_button)
+        audio_btn_layout.addWidget(self.save_file_button)
+        audio_btn_layout.addWidget(self.delete_file_button)
         right_layout.addLayout(audio_btn_layout)
         main_layout.addWidget(right_widget, 1)
 
@@ -215,21 +231,37 @@ class TTSApp(QMainWindow):
             self.player.stop()
             self.play_button.setText("Phát")
 
-    def add_audio_file(self, name, path):
-        self.audio_files.append({'name': name, 'path': path})
-        self.audio_list_widget.addItem(QListWidgetItem(name))
+    def add_temp_file(self, name, path, file_type):
+        self.temp_files.append({'name': name, 'path': path, 'type': file_type})
+        self.temp_file_list_widget.addItem(QListWidgetItem(name))
 
-    def on_audio_selected(self):
-        idx = self.audio_list_widget.currentRow()
-        if idx >= 0:
-            path = self.audio_files[idx]['path']
-            self.play_audio(path)
+    def on_temp_file_selected(self):
+        idx = self.temp_file_list_widget.currentRow()
+        if idx < 0: return
+        
+        file_info = self.temp_files[idx]
+        if file_info['type'] == 'audio':
+            self.play_button.setEnabled(True)
+            self.save_file_button.setText("Lưu file âm thanh")
+            self.save_file_button.setEnabled(True)
+            self.play_audio(file_info['path'])
+        elif file_info['type'] == 'image':
+            self.play_button.setEnabled(False)
+            self.save_file_button.setText("Lưu file ảnh")
+            self.save_file_button.setEnabled(True)
+            # Stop audio if it was playing and an image is selected
+            if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.player.stop()
+                self.play_button.setText("Phát")
 
-    def play_selected_audio(self):
-        idx = self.audio_list_widget.currentRow()
-        if idx < 0:
-            return
-        path = self.audio_files[idx]['path']
+    def play_selected_file(self):
+        idx = self.temp_file_list_widget.currentRow()
+        if idx < 0: return
+        
+        file_info = self.temp_files[idx]
+        if file_info['type'] != 'audio': return # Do not play non-audio files
+        
+        path = file_info['path']
         if self.player.source() == QUrl.fromLocalFile(path) and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
             self.play_button.setText("Phát")
@@ -245,33 +277,49 @@ class TTSApp(QMainWindow):
             self.player.play()
             self.play_button.setText("Tạm dừng")
 
-    def save_selected_audio(self):
-        idx = self.audio_list_widget.currentRow()
-        if idx < 0:
-            return
-        audio = self.audio_files[idx]
-        ext = os.path.splitext(audio['path'])[1]
-        file_path, _ = QFileDialog.getSaveFileName(self, "Lưu file âm thanh", audio['name']+ext, f"{ext.upper().replace('.','')} Files (*{ext})")
+    def save_selected_file(self):
+        idx = self.temp_file_list_widget.currentRow()
+        if idx < 0: return
+        
+        file_info = self.temp_files[idx]
+        path = file_info['path']
+        name = file_info['name']
+        ext = os.path.splitext(path)[1]
+        
+        if file_info['type'] == 'audio':
+            filter = f"Audio Files (*{ext})"
+        elif file_info['type'] == 'image':
+            filter = "Image Files (*.png *.jpg *.jpeg *.bmp *.gif)"
+        else:
+            filter = "All Files (*)"
+
+        save_name_suggestion = os.path.splitext(name)[0] + ext
+        file_path, _ = QFileDialog.getSaveFileName(self, "Lưu file", save_name_suggestion, filter)
+        
         if file_path:
             try:
-                with open(audio['path'], 'rb') as src, open(file_path, 'wb') as dst:
-                    dst.write(src.read())
+                import shutil
+                shutil.copy(path, file_path)
                 self.statusBar.showMessage(f"Đã lưu file thành công tới: {file_path}", 5000)
             except Exception as e:
                 QMessageBox.warning(self, "Lỗi", f"Không thể lưu file: {e}")
 
-    def delete_selected_audio(self):
-        idx = self.audio_list_widget.currentRow()
-        if idx < 0:
-            return
-        audio = self.audio_files.pop(idx)
-        self.audio_list_widget.takeItem(idx)
+    def delete_selected_file(self):
+        idx = self.temp_file_list_widget.currentRow()
+        if idx < 0: return
+        
+        file_info = self.temp_files.pop(idx)
+        self.temp_file_list_widget.takeItem(idx)
         try:
-            os.remove(audio['path'])
+            os.remove(file_info['path'])
         except OSError:
             pass
-        if not self.audio_files:
+        
+        if not self.temp_files:
             self.play_button.setText("Phát")
+            self.play_button.setEnabled(False)
+            self.save_file_button.setText("Lưu file")
+            self.save_file_button.setEnabled(False)
 
     def player_error(self, error, error_string):
         QMessageBox.critical(self, "Lỗi Media Player", f"Gặp lỗi khi phát file:\n{error_string}")
@@ -338,7 +386,7 @@ class TTSApp(QMainWindow):
     def on_edge_tts_finished(self, path):
         self.statusBar.showMessage(f"Đã tạo file thành công: {os.path.basename(path)}", 5000)
         self.read_aloud_button.setEnabled(True)
-        self.add_audio_file(os.path.basename(path), path)
+        self.add_temp_file(os.path.basename(path), path, 'audio')
         self.play_audio(path)
 
     def populate_voices(self, voices):
@@ -411,7 +459,7 @@ class TTSApp(QMainWindow):
         name = os.path.basename(path)
         self.statusBar.showMessage(f"Google TTS tạo file thành công: {name}", 5000)
         self.gtts_speak_button.setEnabled(True)
-        self.add_audio_file(name, path)
+        self.add_temp_file(name, path, 'audio')
         self.play_audio(path)
 
     # --- STT Tab ---
@@ -482,12 +530,6 @@ class TTSApp(QMainWindow):
         self.gemini_refresh_btn = QPushButton("Làm mới")
         self.gemini_refresh_btn.clicked.connect(self.gemini_view.reload)
         control_layout.addWidget(self.gemini_refresh_btn)
-        self.gemini_back_btn = QPushButton("Quay lại")
-        self.gemini_back_btn.clicked.connect(self.gemini_view.back)
-        control_layout.addWidget(self.gemini_back_btn)
-        self.gemini_forward_btn = QPushButton("Tiến tới")
-        self.gemini_forward_btn.clicked.connect(self.gemini_view.forward)
-        control_layout.addWidget(self.gemini_forward_btn)
         
         layout.addLayout(control_layout)
         layout.addWidget(self.gemini_view)
@@ -496,6 +538,8 @@ class TTSApp(QMainWindow):
         copy_tts_btn.clicked.connect(self.extract_and_convert_gemini_text)
         layout.addWidget(copy_tts_btn)
         
+        self.gemini_profile.downloadRequested.connect(self.handle_download)
+
         self.gemini_view.load(QUrl("https://gemini.google.com"))
 
     def import_gemini_cookies(self):
@@ -545,6 +589,93 @@ class TTSApp(QMainWindow):
         self.gemini_view.page().runJavaScript(js_code, self.on_gemini_text_extracted)
 
     def on_gemini_text_extracted(self, text):
+        if text and text.strip():
+            self.text_input.setPlainText(text.strip())
+            self.tabs.setCurrentIndex(0) # Chuyển qua tab Edge TTS
+            self.statusBar.showMessage("Đã sao chép văn bản vào tab Edge TTS!", 5000)
+        else:
+            self.statusBar.showMessage("Không tìm thấy nội dung trả lời của AI.", 5000)
+
+    def handle_download(self, download_item):
+        try:
+            save_dir = os.path.join(self.temp_dir, "images")
+            os.makedirs(save_dir, exist_ok=True)
+            filename = download_item.url().fileName()
+            if not filename:
+                filename = f"download_{uuid.uuid4().hex[:6]}.img"
+            
+            save_path = os.path.join(save_dir, filename)
+            
+            download_item.setDownloadDirectory(save_dir)
+            download_item.setDownloadFileName(filename)
+            download_item.accept()
+            
+            # Thêm file vào danh sách ngay lập tức (workaround cho lỗi 'finished' signal)
+            self.add_temp_file(filename, save_path, 'image')
+            self.statusBar.showMessage(f"Đang tải về: {filename}", 3000)
+        except Exception as e:
+            self.statusBar.showMessage(f"Lỗi khi bắt đầu tải: {e}", 5000)
+
+    def init_chatgpt_tab(self, tab):
+        layout = QVBoxLayout(tab)
+        self.chatgpt_view = QWebEngineView()
+        self.chatgpt_profile = QWebEngineProfile("chatgpt_profile", self.chatgpt_view)
+        self.chatgpt_profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+        self.chatgpt_page = GeminiWebPage(self.chatgpt_profile, self.chatgpt_view)
+        self.chatgpt_view.setPage(self.chatgpt_page)
+
+        control_layout = QHBoxLayout()
+        self.chatgpt_import_cookie_btn = QPushButton("🍪 Nhập Cookie")
+        self.chatgpt_import_cookie_btn.clicked.connect(self.import_chatgpt_cookies)
+        control_layout.addWidget(self.chatgpt_import_cookie_btn)
+        self.chatgpt_refresh_btn = QPushButton("Làm mới")
+        self.chatgpt_refresh_btn.clicked.connect(self.chatgpt_view.reload)
+        control_layout.addWidget(self.chatgpt_refresh_btn)
+        
+        layout.addLayout(control_layout)
+        layout.addWidget(self.chatgpt_view)
+        
+        copy_tts_btn = QPushButton("Sao chép vào TTS")
+        copy_tts_btn.clicked.connect(self.extract_and_convert_chatgpt_text)
+        layout.addWidget(copy_tts_btn)
+        self.chatgpt_profile.downloadRequested.connect(self.handle_download)
+
+        self.chatgpt_view.load(QUrl("https://chatgpt.com/"))
+
+    def import_chatgpt_cookies(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Chọn file Cookie Export", "", "JSON Files (*.json)")
+        if not file_path: return
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                cookies_data = json.load(f)
+            cookie_store = self.chatgpt_page.profile().cookieStore()
+            cookie_store.deleteAllCookies()
+            count = 0
+            for cookie in cookies_data:
+                if 'openai.com' not in cookie.get('domain', '') and 'chatgpt.com' not in cookie.get('domain', ''): continue
+                q_cookie = QNetworkCookie(
+                    cookie.get('name', '').encode(),
+                    cookie.get('value', '').encode()
+                )
+                q_cookie.setDomain(cookie.get('domain', ''))
+                q_cookie.setPath(cookie.get('path', '/'))
+                if 'expirationDate' in cookie and cookie['expirationDate']:
+                    q_cookie.setExpirationDate(QDateTime.fromSecsSinceEpoch(int(cookie['expirationDate'])))
+                q_cookie.setHttpOnly(cookie.get('httpOnly', False))
+                q_cookie.setSecure(cookie.get('secure', False))
+                cookie_store.setCookie(q_cookie)
+                count += 1
+            self.statusBar.showMessage(f"Đã nhập {count} cookie. Đang tải lại...", 3000)
+            QTimer.singleShot(1000, self.chatgpt_view.reload)
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi Nhập Cookie", f"Không thể xử lý file cookie.\nLỗi: {e}")
+
+    def extract_and_convert_chatgpt_text(self):
+        self.statusBar.showMessage("Đang trích xuất văn bản từ ChatGPT...", 3000)
+        js_code = "Array.from(document.querySelectorAll('.markdown')).pop().innerText;"
+        self.chatgpt_view.page().runJavaScript(js_code, self.on_chatgpt_text_extracted)
+
+    def on_chatgpt_text_extracted(self, text):
         if text and text.strip():
             self.text_input.setPlainText(text.strip())
             self.tabs.setCurrentIndex(0) # Chuyển qua tab Edge TTS
